@@ -25,6 +25,16 @@ variable-refresh range topping out at the fastest timing available.
 
 ## Quick start
 
+> **These numbers are specific to a Studio Display XDR (`0x0610:0xae42`) on an
+> M1 Max.** The 87 Hz timing and the 1355.84 MHz clock were measured on that
+> hardware; the pipe clock is an SoC property and the blanking floors are the
+> panel's. On anything else, start at
+> [Adapting this to other hardware](#adapting-this-to-other-hardware) instead of
+> copying these commands. `avedid apply` refuses an EDID whose vendor/product no
+> connected display reports, so a copy-paste on the wrong machine fails closed
+> rather than injecting foreign timings — but it cannot tell that a *plausible*
+> timing is wrong for your panel.
+
 ```bash
 # 1. build the EDID injector
 mkdir -p build && swiftc -O -o build/avedid avedid.swift
@@ -265,9 +275,12 @@ convention, and refuses timings whose `vtotal` drops below the active lines.
 | `--poll N` | safety re-check interval, default 30 s; events drive the fast path |
 
 `apply` validates the EDID first: header, per-block checksums, and the extension
-count in byte 126. It also targets the service already reporting the same
-vendor/product as the EDID being installed, and refuses to guess — applying to an
-unused port would leave a phantom display latched there until reboot.
+count in byte 126. It then targets the service already reporting the same
+vendor/product as the EDID being installed, and **refuses if no connected display
+claims that identity** — the usual cause is an EDID built for a different panel.
+`--index N` overrides that deliberately. It also refuses to guess when nothing is
+identifiable, since applying to an unused port would leave a phantom display
+latched there until reboot.
 
 ### The launch agent
 
@@ -353,6 +366,10 @@ against one display means whichever ran last wins.
   list` shows both; use `--index` or `--all` to override targeting.
 - Mode IDs are **not stable** across EDID changes. Re-read `avedid modes` after
   every `apply` before using `--mode-id`.
+- The agent sometimes logs two startup lines when first loaded, seconds apart.
+  Observed to be harmless — it settles into a single stable process — but the
+  cause was never pinned down: launchd restarted the first instance despite it
+  exiting successfully, which `KeepAlive: SuccessfulExit=false` should not do.
 - Off-spec blanking is where arithmetic stops being a guarantee. 87 Hz at 449 µs
   is within 2% of Apple's own convention; anything much tighter has less margin
   for thermal drift or a marginal cable, and the plausible failure is

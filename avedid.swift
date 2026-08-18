@@ -507,6 +507,19 @@ func selectTargets(
             return edid.vendorID == wanted.vendorID && edid.productID == wanted.productID
         }
         if samePanel.count == 1 { return samePanel }
+        // No connected display claims this EDID's identity. Refuse rather than
+        // falling back: the usual cause is an EDID built for someone else's
+        // panel, and installing it would feed foreign timings to this one.
+        if samePanel.isEmpty {
+            if !fatal { return [] }
+            let seen = all.compactMap { $0.edid?.describedName }.joined(separator: ", ")
+            fail(
+                "this EDID identifies \(wanted.describedName), but no connected display "
+                    + "reports that vendor/product.\n"
+                    + "Connected: \(seen.isEmpty ? "(none readable)" : seen)\n"
+                    + "Build an EDID for your own display, or pass --index N to override "
+                    + "deliberately (see `avedid list`).")
+        }
     }
 
     let matched = all.filter { $0.displayID != nil }
