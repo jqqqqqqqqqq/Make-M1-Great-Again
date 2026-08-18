@@ -1,0 +1,29 @@
+# Build output and generated EDIDs / plists
+build/
+
+# Backups written by install.sh before it overwrites an existing override
+backups/
+
+# Live EDID dumps and probe artifacts from experimenting on real hardware.
+# edid/studio-display-xdr-stock.bin is deliberately tracked as the reference.
+edid/*
+!edid/studio-display-xdr-stock.bin
+*.hex
+
+# Agent log
+avedid.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store
+._*
+
+# Local editor / agent settings
+.claude/settings.local.json
+.vscode/
+.idea/
