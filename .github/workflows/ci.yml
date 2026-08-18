@@ -16,7 +16,7 @@ jobs:
     # DCP and IOAVServiceSetVirtualEDIDMode do not exist on Intel.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Show toolchain
         run: |
@@ -46,7 +46,7 @@ jobs:
             bash -n "$f" && echo "ok $f"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: avedid-arm64
           path: build/avedid
@@ -59,7 +59,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build release binary
         run: |
