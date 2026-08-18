@@ -62,7 +62,8 @@ Python 3 that ships with macOS. Nothing else — no package manager, no
 dependencies, no signing, and no root.
 
 ```bash
-git clone https://github.com/<you>/custom-edid && cd custom-edid
+git clone https://github.com/jqqqqqqqqqq/Make-M1-Great-Again.git
+cd Make-M1-Great-Again
 
 # the injector is one Swift file
 mkdir -p build && swiftc -O -o build/avedid avedid.swift
