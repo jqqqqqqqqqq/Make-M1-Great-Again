@@ -3,11 +3,22 @@
 Adds a **5120×2880 @ 87 Hz** mode to an Apple Studio Display XDR driven by an
 M1 Max Mac Studio, which otherwise offers only 60 Hz. A free replacement for
 SwitchResX for this one job, plus a written-up account of *why* the usual
-approaches fail on Apple Silicon and where the hardware limits actually are.
+approaches fail on Apple Silicon and where the real hardware limit is.
 
-The interesting part is not the 87 Hz. It is that the display-override plist
-every guide tells you to write **does nothing** on Apple Silicon, and that the
-real mechanism is a private IOKit call that has to be reapplied at runtime.
+Two findings, neither of which is the 87 Hz:
+
+1. The display-override plist every guide tells you to write **does nothing** on
+   Apple Silicon. The mechanism that works is a private IOKit call that has to be
+   reapplied at runtime.
+2. The thing that caps refresh rate is not pixel clock and not blanking. It is
+   the display pipe's **active-pixel throughput**, around **1.283 Gpixel/s** on
+   an M1 Max — which is almost exactly the 6K60 the chip is advertised for.
+
+> **Correction notice.** The first published version of this document claimed
+> three limits: a ~1356 MHz pixel clock ceiling, a 395–449 µs vertical blanking
+> floor, and an 80 px minimum horizontal blanking. **All three were wrong**, and
+> the [methodology section](#how-those-numbers-were-got-wrong-first) explains the
+> mistake, because it is an easy one to repeat.
 
 ## Result
 
@@ -16,7 +27,7 @@ real mechanism is a private IOKit call that has to be reapplied at runtime.
 | Hardware | Mac Studio (M1 Max, `J375cAP`) + Studio Display XDR (`0x0610:0xae42`) |
 | Stock | 5120×2880 @ 60 Hz |
 | Achieved | 5120×2880 @ **87.00 Hz**, `htot 5200 vtot 2997`, 1355.84 MHz, 449 µs vblank |
-| Limited by | M1 Max display-pipe clock (~1356 MHz), not the panel or the cable |
+| Limited by | M1 Max display-pipe active-pixel throughput (~1.283 Gpx/s) |
 
 ![System Settings showing Refresh rate: Adaptive (47-87 Hertz)](Proof%20of%20refresh%20rate.png)
 
@@ -26,17 +37,14 @@ variable-refresh range topping out at the fastest timing available.
 ## Quick start
 
 > **These numbers are specific to a Studio Display XDR (`0x0610:0xae42`) on an
-> M1 Max.** The 87 Hz timing and the 1355.84 MHz clock were measured on that
-> hardware; the pipe clock is an SoC property and the blanking floors are the
-> panel's. On anything else, start at
-> [Adapting this to other hardware](#adapting-this-to-other-hardware) instead of
-> copying these commands. `avedid apply` refuses an EDID whose vendor/product no
-> connected display reports, so a copy-paste on the wrong machine fails closed
-> rather than injecting foreign timings — but it cannot tell that a *plausible*
-> timing is wrong for your panel.
+> M1 Max.** The throughput budget is a property of the SoC. On anything else,
+> start at [Adapting this to other hardware](#adapting-this-to-other-hardware).
+> `avedid apply` refuses an EDID whose vendor/product no connected display
+> reports, so a copy-paste on the wrong machine fails closed — but it cannot tell
+> that a *plausible* timing is wrong for your panel.
 
 ```bash
-# 1. build the EDID injector
+# 1. build the injector
 mkdir -p build && swiftc -O -o build/avedid avedid.swift
 
 # 2. generate a patched EDID containing the extra timing
@@ -51,24 +59,19 @@ python3 apple_edid.py build --mode 5120x2880@87:1355.84/vtot=2997
 
 Then pick 87 Hz in **System Settings → Displays**, or `./build/avedid set-hz 87`.
 
-To undo everything: `./uninstall-agent.sh && ./build/avedid revert`. Nothing is
-written to disk that affects boot, so a reboot alone also restores the stock EDID.
+To undo everything: `./uninstall-agent.sh && ./build/avedid revert`. Nothing that
+affects boot is written to disk, so a reboot alone also restores the stock EDID.
 
 ## Building and running
 
 Requirements: an Apple Silicon Mac, macOS 12 or later, and the Xcode command line
 tools for `swiftc` (`xcode-select --install`). `apple_edid.py` needs only the
-Python 3 that ships with macOS. Nothing else — no package manager, no
-dependencies, no signing, and no root.
+Python 3 that ships with macOS. No dependencies, no signing, no root.
 
 ```bash
 git clone https://github.com/jqqqqqqqqqq/Make-M1-Great-Again.git
 cd Make-M1-Great-Again
-
-# the injector is one Swift file
 mkdir -p build && swiftc -O -o build/avedid avedid.swift
-
-# the generator runs as-is
 python3 apple_edid.py --help
 ./build/avedid help
 ```
@@ -88,20 +91,19 @@ python3 tests/test_apple_edid.py
 ```
 
 37 checks covering the timing formula against Apple's own timings, DisplayID
-encode/decode round-trips, the blanking overrides, `--fit-clock` ceiling
-behaviour, patched-EDID structure and checksums, and the CLI's refusal paths.
-No hardware and no display required, which is what makes it a usable CI gate.
+encode/decode round-trips, the blanking overrides, `--fit-clock` behaviour,
+patched-EDID structure and checksums, and the CLI's refusal paths. No hardware
+and no display required, which is what makes it a usable CI gate.
 
 `avedid` itself is only smoke-tested (`avedid help`) in CI, since every other
-subcommand talks to a real display controller. The parts that cannot be tested
-headless are the ones to be careful with when changing them: `apply`, `revert`
-and `watch`.
+subcommand talks to a real display controller. `apply`, `revert` and `watch` are
+the parts to be careful with when changing them.
 
 ### CI and releases
 
-`.github/workflows/ci.yml` runs the test suite and builds the binary on an Apple
-Silicon runner for every push and pull request. Pushing a `v*` tag additionally
-builds, packages and publishes a release with a checksum:
+`.github/workflows/ci.yml` runs the tests and builds the binary on an Apple
+Silicon runner for every push and pull request. Pushing a `v*` tag builds,
+packages and publishes a release with a checksum:
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
@@ -111,15 +113,14 @@ git tag v1.0.0 && git push origin v1.0.0
 
 Every guide says to drop a plist into
 `/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-<v>/DisplayProductID-<p>`
-with an `IODisplayEDID` key. **On Apple Silicon the `IODisplayEDID` key is
-ignored.** The DisplayPort controller (DCP) builds its timing list from the
-panel's real EDID and never consults it.
+with an `IODisplayEDID` key. **On Apple Silicon that key is ignored.** The
+DisplayPort controller (DCP) builds its timing list from the panel's real EDID
+and never consults it.
 
 Verified the boring way: install such an override, reboot, then read the live
-EDID — it comes back bit-identical to the stock dump. The reason this myth
-survives is that the *other* keys in the same plist (`scale-resolutions`,
-`DisplayProductName`, `IOGFlags`) still work, so the file looks like it took
-effect.
+EDID — it comes back bit-identical to the stock dump. The myth survives because
+the *other* keys in the same plist (`scale-resolutions`, `DisplayProductName`,
+`IOGFlags`) still work, so the file looks like it took effect.
 
 ## What actually works
 
@@ -131,7 +132,9 @@ IOAVServiceSetVirtualEDIDMode(avService, 0, NULL);             // revert
 ```
 
 This is what SwitchResX's daemon does on Apple Silicon, and BetterDisplay's EDID
-override too — both binaries import the symbol. `avedid.swift` reimplements it:
+override too — both binaries import the symbol. Its signature was recovered by
+disassembling SwitchResX's daemon; it is not documented anywhere.
+`avedid.swift` reimplements it:
 
 1. Enumerate `DCPAVServiceProxy` services with `Location == "External"`.
 2. Match one to a `CGDirectDisplayID` by comparing EDID bytes 8–11 against
@@ -139,9 +142,7 @@ override too — both binaries import the symbol. `avedid.swift` reimplements it
 3. `IOAVServiceCreateWithService`, then `IOAVServiceSetVirtualEDIDMode`.
 4. `SLSDetectDisplays` to force re-enumeration.
 
-No root required, and nothing is SIP-protected.
-
-Two consequences:
+No root required, and nothing is SIP-protected. Two consequences:
 
 - **No reboot needed.** The new mode appears in about a second.
 - **It does not persist.** A virtual EDID is runtime state, wiped by reboot,
@@ -152,73 +153,134 @@ Two consequences:
 The impermanence is also the safety property: a timing that blacks out the
 display is undone by rebooting, with nothing on disk to clean up.
 
-## The measured limits
+## The real limit: active-pixel throughput
 
-Three independent constraints, each established by probing rather than assumed.
-The method generalises even though the numbers are specific to this hardware.
+```
+measured DCP validation limit = [1.2829, 1.2856) Gactive-pixels/s
+```
 
-| Constraint | Value | How it was established |
-| --- | --- | --- |
-| Display-pipe pixel clock | **~1356 MHz** | 1356.00 MHz produces a working mode; 1356.75 MHz is discarded during EDID parsing |
-| Vertical blanking floor | **395–449 µs** | 449 µs accepted, 395 µs rejected |
-| Horizontal blanking | **≥ 80 px, no exceptions** | 48 / 40 / 24 px all rejected even with generous vblank |
+Every accept/reject outcome observed fits this one number:
 
-Because `pclk = htotal × vtotal × refresh`, these interact:
-shrinking blanking raises the rate a fixed clock can carry. At 87 Hz with the
-mandatory 80 px horizontal blanking, `vtot 2997` gives 449 µs — right at the
-floor. That is why 87 Hz is the ceiling and 88 Hz is not reachable: it would
-need either more clock or less blanking than the hardware allows.
+| Mode | Gpx/s | % of budget | DCP verdict |
+| --- | --- | --- | --- |
+| 5120×2880 @ 87 | 1.2829 | 100.0% | accepted |
+| 5120×2880 @ 88 | 1.2976 | 101.1% | rejected |
+| 3840×2160 @ 150 | 1.2442 | 97.0% | accepted |
+| 3840×2160 @ 155 | 1.2856 | 100.2% | rejected |
+| 3840×2160 @ 160 | 1.3271 | 103.4% | rejected |
+| 2560×1440 @ 300 | 1.1059 | 86.2% | accepted |
 
-Note that with `htot` pinned at 5200, pixel clock and horizontal rate are
-strictly proportional, so this cannot distinguish a ~1356 MHz clock limit from a
-~260.8 kHz horizontal-rate limit. It makes no operational difference: under
-either reading, the wider `htot 5280` the DCP also accepts yields no more than
-87 Hz.
+Active pixels are `width × height × refresh`; blanking is idle time and does not
+count. So the budget converts to a maximum refresh per resolution:
 
-### Three ways a timing gets rejected
+```
+5120x2880    87.0 Hz      3840x2160   154.7 Hz
+2560x1440   348.0 Hz      1920x1080   618.7 Hz
+```
 
-Worth knowing, because they look different and are diagnosed differently:
+That is why **88 Hz is unreachable at 5K**: it needs 1.2976 G, and no amount of
+clock or blanking manipulation changes the active pixel count. It also explains
+the thing that puzzled us first: the panel's own 5120×2880@120 timing needs
+**1.769 G, 138% of budget**, which is why the DCP registers it as `IsPreferred`
+and yet never hands it to CoreGraphics.
 
-1. **DCP validation.** The timing never becomes a mode at all. Check with
-   `ioreg -lw0 -r -c AppleCLCD2` and look for an element matching your
-   `HorizontalAttributes` / `VerticalAttributes`; if it is absent, the DCP threw
-   it out while parsing. This is what happens just past the limits above.
-2. **Enumeration.** A timing the DCP kept can still be withheld from
-   CoreGraphics. The panel's stock 120 Hz timing at 1903 MHz is registered as
-   `IsPreferred` and never reaches CG. `avedid modes` reads this off without
-   changing anything.
-3. **Locking.** A mode enumerates, then fails on selection and reverts. Only
-   actually selecting it reveals this.
+The number is not arbitrary. Apple advertises the M1 Max as driving 6K@60 per
+display, which needs 1.2215 G — **95.2%** of the measured cap. This looks like a
+per-pipe hardware design point sized for 6K60 with a little headroom, not a
+software policy.
 
-A useful shortcut: the highest surviving timing is always the one that appears
-**twice** in `avedid modes` — once `fixed`, once `VRR`, because macOS advertises
-a variable-refresh range topping out at the fastest available timing. So the top
-of that list tells you where the DCP stopped accepting.
+### What is explicitly *not* limited
 
-### What does not work, so nobody retries it
+Each of these was demonstrated by a mode that violates it while staying inside
+the throughput budget:
 
-- **The panel's own 120 Hz timing.** Present in the stock EDID at 1903 MHz and
-  marked `IsPreferred`, but 1.4× past the pipe clock. Unreachable.
-- **Tiling / dual-head.** The panel really is internally 2×1 tiled (DisplayID
-  Tiled Display Topology: two 2560×2880 tiles, single enclosure), and the DCP
-  parses it — `DisplayHints` shows `Tiled=Yes, TileW=2560`. There are even two
-  DPTX ports and two AV controllers on this DCP instance. But the panel presents
-  a **single SST sink** (`SinkCount = 1`, no MST branch), so there is no second
-  stream to assign a second pipe to. Splitting would have halved the per-pipe
-  clock; it is not available.
-- **Thunderbolt.** MST is a DisplayPort-layer property, not a transport one. A
-  TB tunnel does not create a sink the display does not have. (This display in
-  fact negotiates plain DP alt-mode: `Tunneled = No`, and no TB bus enumerates it.)
-- **DSC.** Compresses the link downstream of the pipe. The pixel clock the pipe
-  sees is unchanged, so it cannot buy refresh rate.
+| Not a limit | Disproved by |
+| --- | --- |
+| Pixel clock | **1470 MHz** accepted (2560×1440@300) |
+| Vertical blanking | **156 µs** accepted (5120×2880@86.90), vs Apple's 460 µs convention |
+| Horizontal blanking | **24 px** accepted (5120×2880@86.85), vs Apple's 80 |
+| Refresh rate itself | **300 Hz** accepted at 1440p |
 
-### Known trade-off
+### Can the limit be bypassed?
+
+Not in software. What was considered:
+
+- **Tiling — architecturally correct, blocked at the display.** Split into two
+  2560×2880 tiles on two pipes and 5K@120 needs only **0.885 G per pipe (69% of
+  budget)**. Comfortably inside. The panel genuinely is internally 2×1 tiled and
+  the DCP parses it (`DisplayHints` shows `Tiled=Yes, TileW=2560`), and the host
+  even has a spare head — `dispext0` exposes two DPTX ports and two AV
+  controllers, with `Unit 1` empty. But the panel presents a **single SST sink**
+  (`SinkCount = 1`, empty `BranchDeviceID`), so there is no second stream to
+  assign. The gate is on the display's side of the cable.
+- **Thunderbolt.** MST is a DisplayPort-layer property, not a transport one. A TB
+  tunnel does not create a sink the display does not have. (This display in fact
+  negotiates plain DP alt-mode: `Tunneled = No`, and no TB bus enumerates it.)
+- **DSC, reduced bit depth, chroma subsampling.** All operate on *bits*; the limit
+  counts *pixels*. DSC is already engaged at 87 Hz and is irrelevant to the
+  boundary.
+- **Interlacing.** Halves active pixels per field, doubles field rate — identical
+  throughput. macOS does not do interlaced over DisplayPort anyway.
+- **Lower resolution.** Works (4K allows ~155 Hz) but means running non-native on
+  a 5K panel. See the caveat below about host validation versus actual display.
+- **Patching the limit.** It lives in DCP firmware, inside the signed boot chain.
+
+The realistic levers are newer silicon (M3/M4 pipes are near-certainly budgeted
+higher — untested here, and this tooling measures it directly) or a display that
+exposes tiled dual-stream.
+
+### Host validation is not the same as displaying
+
+Everything above measures whether the **DCP accepts a timing**, observable in
+`ioreg -lw0 -r -c AppleCLCD2` and in `avedid modes`. Whether the panel then locks
+to it is a separate gate. This panel's EDID declares 47–120 Hz vertical, max
+367 kHz horizontal and max 1910 MHz pixel clock — so 3840×2160@150 and
+2560×1440@300 pass the host and may well be refused by the display. **Untested.**
+Only 5120×2880@87 is confirmed actually running.
+
+## How those numbers were got wrong first
+
+Worth recording, because the mistake is easy to repeat and cost several rounds.
+
+The first version of this document claimed a ~1356 MHz clock ceiling, a
+395–449 µs vertical blanking floor, and an 80 px horizontal blanking minimum.
+Every one of those was an artifact of the same error: **all the probes that
+"measured" them worked by raising refresh rate**, and raising refresh rate raises
+throughput. So the throughput cap was tripping in every experiment, and each
+result got attributed to whichever variable was being nominally adjusted.
+
+The giveaway was visible in the data before the model was: sorted by verdict, the
+accepted and rejected *pixel clock* ranges overlapped (1356.00 accepted,
+1355.54 rejected) and so did the *blanking* ranges (449 µs accepted, 457 µs
+rejected). Only refresh rate separated them cleanly — which is what pointed at a
+quantity proportional to it.
+
+What finally worked was testing at a **lower** rate: 86.85, 86.90 and 86.95 Hz
+timings that each broke one supposed limit — 1378 MHz clock, 156 µs vblank, 24 px
+hblank — while staying under the real cap. All three were accepted, retracting all
+three limits at once. Then a cross-resolution probe (1440p@300, 4K@150/155/160)
+separated throughput from refresh rate and pinned the budget to 0.22%.
+
+**The transferable lesson: to isolate a variable, hold *throughput* constant, not
+clock and not blanking.**
+
+## Known trade-off: no media refresh rates
 
 Custom timings carry no `DiscreteMediaRefreshRates`, while every stock timing
-does — the stock 60 Hz mode can drop the panel to 47.95/48 Hz for 24 fps content,
-and the 87 Hz mode cannot. The custom mode does expose a VRR range (47–87 Hz),
-so playback may be handled that way instead; this has not been verified. If you
-watch a lot of 24 fps video, 60 Hz is genuinely better for that.
+does. The stock 60 Hz mode can drop the panel to 47.95/48 Hz for 24 fps content;
+the 87 Hz mode cannot. The custom mode does expose a VRR range (47–87 Hz), so
+playback may be handled that way instead — unverified.
+
+The cause is **not** the DisplayID section header. The tool emits DisplayID 1.1 /
+product type 3 by default while Apple's stock sections use 1.2 / type 0; that was
+made selectable (`--section apple`), tested, and made no difference. A better
+guess, untested: the 120 Hz element's media list contains 100.00 and 119.88 Hz,
+and *neither exists as a Type I timing in the EDID*, so the list is assembled
+from somewhere else — most likely the CTA-861 block (block 1, which this tool
+never touches), where standard formats are declared by VIC. 5120×2880@87 is not a
+standard VIC, so there may be nothing valid to attach.
+
+If you watch a lot of 24 fps video, 60 Hz is genuinely better for that.
 
 ## Command reference
 
@@ -226,8 +288,8 @@ watch a lot of 24 fps video, 60 Hz is genuinely better for that.
 
 ```bash
 python3 apple_edid.py build --mode WxH@RATE[:MHZ][/vtot=N][/vblank=N][/hblank=N] ...
-python3 apple_edid.py dump  <edid.bin>     # decode every timing
-python3 apple_edid.py read                 # live EDID from ioreg, as hex
+python3 apple_edid.py dump  <edid.bin|edid.hex>   # decode every timing
+python3 apple_edid.py read                        # live EDID from ioreg, as hex
 ```
 
 Timings follow Apple's own formula — CVT reduced-blanking with a fixed 80 px
@@ -246,19 +308,23 @@ the 460 µs rule, which gives 2945. `tests/test_apple_edid.py` asserts both the
 | `:MHZ` | pin the pixel clock exactly (otherwise rounded to the nearest 10 kHz, Apple's convention) |
 | `/vtot=N`, `/vblank=N` | override the derived vertical blanking |
 | `/hblank=N` | override horizontal blanking (≥ 24 px; back porch gives way before sync width) |
-| `--fit-clock MHZ` | shrink vertical blanking only as far as needed to fit each mode under a clock ceiling, keeping as much as possible |
+| `--fit-clock MHZ` | shrink vertical blanking only as far as needed to fit each mode under a clock ceiling |
+| `--section legacy\|apple` | DisplayID section header; `apple` matches the stock sections |
 | `--preserve PLIST` | carry `scale-resolutions` / `IOGFlags` / policies over from an existing override |
 | `--stock`, `--name`, `--label`, `--out-edid`, `--out-plist` | inputs and outputs |
 
-It warns when a mode's vertical blanking falls meaningfully below the 460 µs
-convention, and refuses timings whose `vtotal` drops below the active lines.
+`dump` accepts raw bytes or a hex dump, so `read` output can be fed straight back.
+`--fit-clock` is a leftover from the mistaken clock-ceiling model; it is still
+useful for pinning a clock budget deliberately, but it is not how you find the
+real limit — see [the throughput section](#the-real-limit-active-pixel-throughput).
 
 ### `avedid` — the injector
 
 ```bash
 ./build/avedid list                   # external displays and their current EDID
 ./build/avedid dump                   # the EDID a display reports, as hex
-./build/avedid modes                  # rates at the current resolution, fixed vs VRR
+./build/avedid modes                  # rates at the current resolution, plus
+                                      # max rate and throughput per resolution
 ./build/avedid set-hz 87              # switch rate (nearest within 0.05 Hz)
 ./build/avedid set-hz --mode-id 94    # switch to an exact mode ID from `modes`
 ./build/avedid apply <edid.bin>       # install a virtual EDID
@@ -270,24 +336,31 @@ convention, and refuses timings whose `vtotal` drops below the active lines.
 | --- | --- |
 | `--index N`, `--all` | pick targets. `apply` refuses to guess; `revert` falls back to all, since disabling is harmless |
 | `--yes`, `--dry-run`, `--no-redetect` | non-interactive, no-op, skip the re-detect |
-| `--skip-if-modifiers` | do nothing if Shift or Option is held — the launch agent's escape hatch |
+| `--ignore-agent` | apply even though the launch agent is loaded |
+| `--skip-if-modifiers` | do nothing if Shift or Option is held — the agent's escape hatch |
 | `--delay N` | wait before acting, so the display finishes enumerating after login |
 | `--restore-hz N` | reselect N Hz after each reinstall (`watch`) |
 | `--poll N` | safety re-check interval, default 30 s; events drive the fast path |
 
-`apply` validates the EDID first: header, per-block checksums, and the extension
-count in byte 126. It then targets the service already reporting the same
-vendor/product as the EDID being installed, and **refuses if no connected display
-claims that identity** — the usual cause is an EDID built for a different panel.
-`--index N` overrides that deliberately. It also refuses to guess when nothing is
-identifiable, since applying to an unused port would leave a phantom display
-latched there until reboot.
+`apply` validates the EDID first (header, per-block checksums, extension count in
+byte 126), then targets the service already reporting the same vendor/product as
+the EDID being installed and **refuses if no connected display claims that
+identity**. It also **refuses while the launch agent is loaded**, because a
+resident `watch` reinstalls its own EDID within a minute and that silent revert is
+indistinguishable from the DCP rejecting the timing — which makes probing
+actively misleading. Stop the agent first, or pass `--ignore-agent`.
+
+Each injected timing surfaces **twice** at the top rate, as a VRR and a non-VRR
+variant (`modes` labels them and shows distinct mode IDs) — macOS advertises a
+variable-refresh range topping out at the fastest timing available. Mode IDs are
+**not stable** across EDID changes; re-read `modes` after every `apply`.
 
 ### The launch agent
 
 ```bash
 ./install-agent.sh [edid.bin] [hz]    # defaults to build/patched.bin at 87 Hz
-./uninstall-agent.sh
+./uninstall-agent.sh                  # removes the plist
+launchctl bootout gui/$UID/local.avedid   # just stops it, keeps the plist
 tail -f /tmp/avedid.log
 ```
 
@@ -307,30 +380,46 @@ display, so a persistent mismatch cannot become a screen flash on every check.
 
 ## Adapting this to other hardware
 
-1. `python3 apple_edid.py read > mine.hex` and
-   `python3 apple_edid.py dump mine.bin` to see your stock timings.
-2. Find your IDs: `./build/avedid list` prints vendor and product.
-3. Measure your pixel-clock ceiling before guessing at refresh rates — hold the
-   geometry fixed at a known-good timing and pin only the clock upward:
+1. `python3 apple_edid.py read > mine.hex` then `python3 apple_edid.py dump
+   mine.hex` to see your stock timings. `./build/avedid list` prints your IDs.
+2. **Measure your throughput budget first.** It is the number that predicts
+   everything, and `avedid modes` reports Gpx/s per resolution to compare
+   against. Probe it by bisecting refresh rate at your native resolution while
+   keeping blanking at Apple's conventions:
 
    ```bash
    python3 apple_edid.py build \
-       --mode 5120x2880@86.0005:1341.16/vtot=2999 \
-       --mode 5120x2880@86.1826:1344.00/vtot=2999 \
-       --mode 5120x2880@86.3749:1347.00/vtot=2999
+       --mode 5120x2880@88 --mode 5120x2880@92 --mode 5120x2880@96
+   ./build/avedid apply build/patched.bin && ./build/avedid modes
    ```
 
-   Rungs a fraction of a Hz apart are indistinguishable in System Settings,
-   hence `avedid modes` and `set-hz`. Always include a known-good rung so a
-   rejected one still leaves something selectable.
-4. Only then trade blanking for refresh, via `--fit-clock` at the measured
-   ceiling. Doing it in this order matters: measuring the clock first was worth a
-   full Hz here, because at the clock originally assumed to be the limit, 87 Hz
-   needed off-spec blanking, and at the real one it needs only 449 µs.
+   Always include a known-good rung so a rejected one still leaves something
+   selectable. A rejected timing is one the DCP discarded during EDID parsing —
+   confirm with `ioreg -lw0 -r -c AppleCLCD2` if `modes` is ambiguous.
+3. Do **not** try to isolate clock or blanking limits by raising refresh rate.
+   That is the error described [above](#how-those-numbers-were-got-wrong-first).
+   If you suspect a secondary limit, test it at a rate *below* your measured
+   throughput ceiling.
+4. Sanity-check your number against what the SoC is advertised for. On the M1 Max
+   the budget landed 5% above the 6K60 it is specced for, which is a good sign
+   the measurement is real rather than an artifact.
 
 Timings on other Apple panels are likely to follow the same 80 px / 460 µs
-formula, but the pipe clock is an SoC property and will differ — M3 and M4 are
-expected to be higher, though that is untested here.
+formula, but the throughput budget is an SoC property and will differ.
+
+### Three ways a timing gets rejected
+
+They look different and are diagnosed differently:
+
+1. **DCP validation.** The timing never becomes a timing element at all. Check
+   `ioreg -lw0 -r -c AppleCLCD2` for an element matching your
+   `HorizontalAttributes` / `VerticalAttributes`; if absent, the DCP discarded it
+   while parsing. This is what exceeding the throughput budget looks like, and
+   why the mode simply is not there.
+2. **Enumeration.** A timing the DCP kept can still be withheld from
+   CoreGraphics. `avedid modes` reads this off without changing anything.
+3. **Locking.** A mode enumerates and then fails on selection, reverting. Only
+   selecting it reveals this — hold it ~30 s to be sure.
 
 ## Files
 
@@ -362,19 +451,19 @@ against one display means whichever ran last wins.
   hot-plug restores the panel's real EDID.
 - If the display comes up black, reboot — nothing was written to disk. With the
   agent installed, hold Shift or Option while logging in to skip it.
+- **Stop the agent before probing.** It reinstalls its own EDID within a minute,
+  which looks exactly like a rejected timing. `avedid apply` now refuses while it
+  is loaded, for this reason.
 - This Mac exposes **two** external `DCPAVServiceProxy` nodes and only one
-  returns an EDID. They are separate ports, not the panel's two tiles. `avedid
-  list` shows both; use `--index` or `--all` to override targeting.
-- Mode IDs are **not stable** across EDID changes. Re-read `avedid modes` after
-  every `apply` before using `--mode-id`.
+  returns an EDID. They are separate ports (`dispextE` and `dispext0`), not the
+  panel's two tiles. `avedid list` shows both.
 - The agent sometimes logs two startup lines when first loaded, seconds apart.
   Observed to be harmless — it settles into a single stable process — but the
-  cause was never pinned down: launchd restarted the first instance despite it
-  exiting successfully, which `KeepAlive: SuccessfulExit=false` should not do.
-- Off-spec blanking is where arithmetic stops being a guarantee. 87 Hz at 449 µs
-  is within 2% of Apple's own convention; anything much tighter has less margin
-  for thermal drift or a marginal cable, and the plausible failure is
-  intermittent sync loss rather than an immediate black screen.
+  cause was never pinned down: launchd restarted the first instance despite a
+  successful exit, which `KeepAlive: SuccessfulExit=false` should not do.
+- 87 Hz runs at 449 µs of vertical blanking, within 2% of Apple's 460 µs
+  convention. Much tighter blanking is *accepted* by the DCP (156 µs was), but
+  leaves less margin for thermal drift or a marginal cable, and the plausible
+  failure is intermittent sync loss rather than an immediate black screen.
 - Everything here uses private, undocumented APIs. They can change or vanish in
-  any macOS update. `IOAVServiceSetVirtualEDIDMode`'s signature was recovered by
-  disassembling SwitchResX's daemon, not from any documentation.
+  any macOS update.

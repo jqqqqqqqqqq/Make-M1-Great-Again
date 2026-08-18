@@ -264,6 +264,21 @@ func escapeModifiersHeld() -> Bool {
     return flags.contains(.maskShift) || flags.contains(.maskAlternate)
 }
 
+/// The launch agent's label, if it is currently loaded. A resident `watch`
+/// reinstalls its own EDID within a minute, so applying a different one while it
+/// runs silently reverts — which looks exactly like the DCP rejecting the timing.
+func loadedAgentLabel() -> String? {
+    let label = "local.avedid"
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    task.arguments = ["list", label]
+    task.standardOutput = FileHandle.nullDevice
+    task.standardError = FileHandle.nullDevice
+    do { try task.run() } catch { return nil }
+    task.waitUntilExit()
+    return task.terminationStatus == 0 ? label : nil
+}
+
 func redetectDisplays() {
     guard let detect = slsDetectDisplays else {
         print("note: SLSDetectDisplays unavailable; you may need to sleep/wake the display.")
@@ -411,6 +426,8 @@ let usage = """
       --no-redetect            skip the SLSDetectDisplays call afterwards
       --skip-if-modifiers      do nothing if Shift or Option is held (escape
                                hatch for the launch agent)
+      --ignore-agent           apply even though the launch agent is loaded (it
+                               will revert the EDID unless it watches this file)
       --delay N                wait N seconds first, to let the display finish
                                enumerating after login
       --restore-hz N           after reinstalling, reselect an N Hz mode at the
@@ -445,6 +462,7 @@ let assumeYes = takeFlag("--yes")
 let dryRun = takeFlag("--dry-run")
 let noRedetect = takeFlag("--no-redetect")
 let skipIfModifiers = takeFlag("--skip-if-modifiers")
+let ignoreAgent = takeFlag("--ignore-agent")
 let indexOption: Int? = takeOption("--index").map {
     guard let n = Int($0) else { fail("--index needs a number") }
     return n
@@ -610,6 +628,25 @@ case "modes":
             print(String(format: "      %9.4f Hz  modeID=%-4d%@%@",
                 mode.refreshRate, mode.ioDisplayModeID, vrr, marker))
         }
+
+        // Every other pixel resolution, with its active-pixel throughput. The
+        // M1 Max caps the display pipe on active pixels per second rather than
+        // on refresh rate, so this is the number that predicts what will latch.
+        let opts = [kCGDisplayShowDuplicateLowResolutionModes as String: true] as CFDictionary
+        guard let all = CGDisplayCopyAllDisplayModes(displayID, opts) as? [CGDisplayMode]
+        else { continue }
+        var top: [Int: (Int, Int, Double)] = [:]
+        for m in all {
+            let px = m.pixelWidth * m.pixelHeight
+            if let e = top[px], e.2 >= m.refreshRate { continue }
+            top[px] = (m.pixelWidth, m.pixelHeight, m.refreshRate)
+        }
+        print("      — highest rate per pixel resolution —")
+        for px in top.keys.sorted(by: >) {
+            let (w, h, hz) = top[px]!
+            print(String(format: "      %5dx%-5d %9.4f Hz  %6.3f Gpx/s active",
+                w, h, hz, Double(px) * hz / 1e9))
+        }
     }
 
 case "set-hz":
@@ -651,6 +688,18 @@ case "apply":
     print("Installing \(edid.describedName) from \(path) on:")
     for target in targets { print("  " + target.label) }
     print()
+
+    // Refuse rather than warn: a silent revert a minute later is indistinguishable
+    // from the DCP rejecting the timing, which makes probing actively misleading.
+    if let label = loadedAgentLabel(), !dryRun, !ignoreAgent {
+        fail(
+            "the \(label) launch agent is running and will reinstall its own EDID "
+                + "within a minute, silently reverting this one.\n"
+                + "Stop it first:   launchctl bootout gui/$UID/\(label)\n"
+                + "Restore it after: ./install-agent.sh <edid.bin> <hz>\n"
+                + "Or pass --ignore-agent if you know it watches this same file.")
+    }
+
     print("If the display goes black, reboot — a virtual EDID never survives one.")
     confirm("Continue?")
 

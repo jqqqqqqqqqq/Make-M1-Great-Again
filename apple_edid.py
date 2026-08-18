@@ -185,8 +185,26 @@ def decode_type1(d: bytes) -> Timing:
                   bool(flags & 0x80))
 
 
-def build_displayid_block(timings, label="CustomEDID") -> bytes:
-    """Build a 128-byte EDID extension holding a DisplayID 1.1 section."""
+# DisplayID section headers. `legacy` is what this tool emitted originally and
+# what the deployed 87 Hz EDID uses. `apple` matches the stock sections in this
+# panel's own EDID: DisplayID 1.2, product type 0 ("extension section", i.e. this
+# section extends the primary display description rather than describing a
+# separate product). Whether that changes how macOS treats the timings —
+# specifically whether it grants them DiscreteMediaRefreshRates — is the reason
+# it is selectable.
+SECTION_STYLES = {
+    "legacy": (0x11, 0x03),
+    "apple": (0x12, 0x00),
+}
+
+
+def build_displayid_block(timings, label="CustomEDID", style="legacy") -> bytes:
+    """Build a 128-byte EDID extension holding one DisplayID section."""
+    try:
+        version, product_type = SECTION_STYLES[style]
+    except KeyError:
+        raise ValueError(f"unknown section style {style!r}; "
+                         f"expected one of {', '.join(SECTION_STYLES)}")
     data = bytearray()
 
     timing_payload = b"".join(encode_type1(t) for t in timings)
@@ -197,7 +215,7 @@ def build_displayid_block(timings, label="CustomEDID") -> bytes:
     tag = label.encode("ascii")
     data += bytes([0x0B, 0x00, len(tag)]) + tag                        # ASCII string
 
-    section = bytearray([0x11, len(data), 0x03, 0x00]) + data          # ver, len, type, ext
+    section = bytearray([version, len(data), product_type, 0x00]) + data  # ver, len, type, ext
     section.append((-sum(section)) & 0xFF)                             # DisplayID checksum
 
     block = bytearray([0x70]) + section                                # EDID extension tag
@@ -207,7 +225,7 @@ def build_displayid_block(timings, label="CustomEDID") -> bytes:
     return bytes(block)
 
 
-def patch_edid(stock: bytes, timings, label="CustomEDID") -> bytes:
+def patch_edid(stock: bytes, timings, label="CustomEDID", style="legacy") -> bytes:
     if len(stock) % 128:
         raise ValueError(f"EDID length {len(stock)} is not a multiple of 128")
     if stock[:8] != b"\x00\xff\xff\xff\xff\xff\xff\x00":
@@ -223,7 +241,7 @@ def patch_edid(stock: bytes, timings, label="CustomEDID") -> bytes:
     base[127] = (base[127] - 1) & 0xFF                                 # keep checksum at 0
     assert sum(base) % 256 == 0
 
-    return bytes(base) + stock[128:] + build_displayid_block(timings, label)
+    return bytes(base) + stock[128:] + build_displayid_block(timings, label, style)
 
 
 # --- EDID decoding (for verification) ---------------------------------------
@@ -381,6 +399,10 @@ def main():
                         "to fit each mode under it, keeping as much as it can")
     p.add_argument("--name", default="Studio Display XDR", help="DisplayProductName")
     p.add_argument("--label", default="CustomEDID", help="ASCII tag inside the DisplayID block")
+    p.add_argument("--section", choices=sorted(SECTION_STYLES), default="legacy",
+                   help="DisplayID section header: 'legacy' (1.1, product type 3) or "
+                        "'apple' (1.2, type 0), matching this panel's stock sections "
+                        "(default: %(default)s)")
     p.add_argument("--out-edid", default="build/patched.bin")
     p.add_argument("--out-plist", default="build/DisplayProductID-ae42")
     p.add_argument("--preserve", metavar="PLIST",
@@ -420,7 +442,7 @@ def main():
                   f"{t.v_blank_us / MIN_V_BLANK_US * 100:.0f}% of Apple's "
                   f"{MIN_V_BLANK_US:.0f}us convention; the panel may refuse it")
 
-    patched = patch_edid(stock, timings, args.label)
+    patched = patch_edid(stock, timings, args.label, args.section)
 
     extra = {}
     if args.preserve:
